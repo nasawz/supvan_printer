@@ -1,0 +1,5 @@
+framework module SFPrintSDK {
+  umbrella header "SFPrintSDK_Module.h"
+  export *
+  module * { export * }
+}
