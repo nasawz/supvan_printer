@@ -289,6 +289,7 @@ public class SupvanPrinterPlugin: NSObject, FlutterPlugin {
         let horizontalOffset = args["horizontalOffset"] as? Int ?? 0
         let verticalOffset = args["verticalOffset"] as? Int ?? 0
         let paperType = args["paperType"] as? Int ?? 1
+        let gap = args["gap"] as? Int ?? 3
         let oneByOne = args["oneByOne"] as? Bool ?? true
 
         let setModel = SFPrintSetModel()
@@ -306,6 +307,22 @@ public class SupvanPrinterPlugin: NSObject, FlutterPlugin {
         setModel.materialType = Int32(paperType)
         setModel.oneByone = Int32(oneByOne ? 1 : 0)
 
+        // iOS SFPrintSDK does not expose a gap property on SFPrintSetModel.
+        // Internally: SFPrintSDKUtils._utils (SFPrintUtils) -> _pgSetup (PageSetupInfo)
+        // has HasHoleOrSpace and HoleOrSpaceWidth. We set them via KVC so
+        // continuous printing aligns correctly on gap paper.
+        if gap > 0, paperType == 1 {
+            let sdkUtils = SFPrintSDKUtils.shareInstance()
+            if let printUtils = sdkUtils.value(forKey: "utils") as? NSObject,
+               let pgSetup = printUtils.value(forKey: "pgSetup") as? NSObject {
+                pgSetup.setValue(true, forKey: "HasHoleOrSpace")
+                pgSetup.setValue(Int32(gap), forKey: "HoleOrSpaceWidth")
+                NSLog("[SupvanPrinter] Set pgSetup gap: HasHoleOrSpace=true, HoleOrSpaceWidth=%d", gap)
+            } else {
+                NSLog("[SupvanPrinter] WARNING: Could not access utils.pgSetup via KVC")
+            }
+        }
+
         // Build draw objects from pages
         var drawModels: [SFPrintDrawobjectModel] = []
 
@@ -313,39 +330,54 @@ public class SupvanPrinterPlugin: NSObject, FlutterPlugin {
             for page in pages {
                 if let items = page["items"] as? [[String: Any]] {
                     for item in items {
-                        let drawModel = SFPrintDrawobjectModel()
-
                         let format = item["format"] as? String ?? "TEXT"
                         let x = item["x"] as? Double ?? 0
                         let y = item["y"] as? Double ?? 0
                         let width = item["width"] as? Double ?? 10
                         let height = item["height"] as? Double ?? 5
-                        let content = item["content"] as? String ?? ""
-                        let fontSize = item["fontSize"] as? Int ?? 3
-                        let fontStyle = item["fontStyle"] as? Int ?? 0
-                        let fontName = item["fontName"] as? String ?? "HarmonyOS_Sans_SC"
                         let antiColor = item["antiColor"] as? Bool ?? false
 
+                        let drawModel = SFPrintDrawobjectModel()
+                        drawModel.textColor = NSNumber(value: antiColor ? 1 : 0)
                         drawModel.x = x
                         drawModel.y = y
                         drawModel.width = width
                         drawModel.height = height
-                        drawModel.content = content
-                        drawModel.fontSize = Int32(fontSize)
-                        drawModel.fontStyle = Int32(fontStyle)
-                        drawModel.fontName = fontName.isEmpty ? "HarmonyOS_Sans_SC" : fontName
-                        drawModel.textColor = NSNumber(value: antiColor ? 1 : 0)
-                        drawModel.format = format
-                        drawModel.verAlignmentType = 0
-                        drawModel.autoReturn = true
 
-                        // Handle image type
                         if format == "IMAGE" {
+                            // Image items: only set localImage + format.
+                            // Must NOT set fontName/fontSize/content/etc — the
+                            // SDK's DrawUtils crashes when text props are set
+                            // on an Image-format model.
+                            drawModel.format = "Image"
+                            drawModel.verAlignmentType = 0
+                            drawModel.autoReturn = true
+
                             if let imageBytes = item["imageBytes"] as? FlutterStandardTypedData {
                                 if let image = UIImage(data: imageBytes.data) {
                                     drawModel.localImage = image
+                                    NSLog("[SupvanPrinter] Image item: %.1fx%.1f at (%.1f,%.1f), bytes=%d",
+                                          width, height, x, y, imageBytes.data.count)
+                                } else {
+                                    NSLog("[SupvanPrinter] WARNING: Failed to decode UIImage from %d bytes", imageBytes.data.count)
                                 }
+                            } else {
+                                NSLog("[SupvanPrinter] WARNING: imageBytes missing or wrong type for IMAGE item")
                             }
+                        } else {
+                            // Text / barcode / QR items
+                            let content = item["content"] as? String ?? ""
+                            let fontSize = item["fontSize"] as? Int ?? 3
+                            let fontStyle = item["fontStyle"] as? Int ?? 0
+                            let fontName = item["fontName"] as? String ?? "HarmonyOS_Sans_SC"
+
+                            drawModel.format = "TEXT"
+                            drawModel.content = content
+                            drawModel.fontSize = Int32(fontSize)
+                            drawModel.fontStyle = Int32(fontStyle)
+                            drawModel.fontName = fontName.isEmpty ? "HarmonyOS_Sans_SC" : fontName
+                            drawModel.verAlignmentType = 0
+                            drawModel.autoReturn = true
                         }
 
                         drawModels.append(drawModel)
